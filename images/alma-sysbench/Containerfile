@@ -1,0 +1,24 @@
+# Satisfy prerequisites
+# Base image (https://wiki.almalinux.org/containers/docker-images.html#about-almalinux-docker-images)
+FROM almalinux:8.9@sha256:da502e3b8e6d08ee7aa2c384acda0a4afbf31ddae28b6a02e2a5e3003fe86dd9 as prerequisites
+# Install prerequisites
+RUN dnf install -y curl-7.61.1-33.el8 make-4.2.1-11.el8 automake-1.16.1-8.el8 libtool-2.4.6-25.el8 pkgconf-pkg-config-1.4.2-1.el8 libaio-devel-0.3.112-1.el8 which-2.21-20.el8 && \
+    dnf clean -y all
+
+# Build SysBench
+FROM prerequisites as sysbench
+ARG SYSBENCH_VERSION="1.0.20"
+# Pull & extract SysBench source tarball
+WORKDIR "/workdir"
+RUN curl -fSsL -o "/workdir/sysbench-${SYSBENCH_VERSION}.tar.gz" "https://github.com/akopytov/sysbench/archive/refs/tags/${SYSBENCH_VERSION}.tar.gz" && \
+    tar xzf "/workdir/sysbench-${SYSBENCH_VERSION}.tar.gz"
+# Compile SysBench
+WORKDIR "/workdir/sysbench-${SYSBENCH_VERSION}"
+RUN ./autogen.sh && \
+    ./configure --without-mysql && \
+    make -j && \
+    make install
+
+FROM prerequisites as final
+COPY --from=sysbench "/usr/local/bin/sysbench" "/bin/sysbench"
+ENTRYPOINT ["/bin/sysbench"]

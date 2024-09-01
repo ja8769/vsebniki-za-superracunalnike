@@ -1,0 +1,86 @@
+FROM almalinux:8.9@sha256:da502e3b8e6d08ee7aa2c384acda0a4afbf31ddae28b6a02e2a5e3003fe86dd9 as base
+
+FROM base as prerequisites
+RUN dnf install -y git-2.43.5-1.el8_10 make-4.2.1-11.el8 gcc-8.5.0-22.el8_10 gcc-c++-8.5.0-22.el8_10 bzip2-1.0.6-26.el8
+
+FROM prerequisites as cuda
+ENV CUDA_DIR="/usr/local/cuda-12.5" \
+    CUDA_VERSION="12.5.0"
+COPY --from=nvcr.io/nvidia/cuda:12.5.0-devel-rockylinux8@sha256:a9ba6587834046132d4ab05a1ce7a01a78fba885bc9eb9f549565b38976983fc "/usr/local/cuda-12.5" "$CUDA_DIR"
+
+FROM cuda as ucx
+ENV UCX_DIR="/opt/ucx" \
+    UCX_VERSION="1.17.0"
+WORKDIR /workdir
+RUN curl -fSsL -O "https://github.com/openucx/ucx/releases/download/v${UCX_VERSION}/ucx-${UCX_VERSION}.tar.gz" && \
+    tar xzf "ucx-${UCX_VERSION}.tar.gz"
+WORKDIR "/workdir/ucx-${UCX_VERSION}/build"
+RUN ../configure \
+        --prefix="$UCX_DIR" \
+        --without-knem \
+        --without-java \
+        --with-cuda="$CUDA_DIR" \
+        && \
+    make -j8 && \
+    make install 
+
+FROM ucx as ompi
+ENV OMPI_DIR="/opt/ompi" \
+    OMPI_VERSION="4.1.7a1"
+WORKDIR /workdir
+RUN curl -fSsL -O "https://linux.mellanox.com/public/repo/mlnx_ofed/latest/SRPMS/openmpi-${OMPI_VERSION}.tar.bz2" && \
+    tar --no-same-owner -xjf "openmpi-${OMPI_VERSION}.tar.bz2"
+WORKDIR "/workdir/openmpi-${OMPI_VERSION}/build"
+RUN ../configure \
+        --prefix="$OMPI_DIR" \
+        --without-xpmem \
+        --with-slurm \
+        --with-pmix=internal \
+        --with-cuda="$CUDA_DIR" \
+        --with-ucx="$UCX_DIR" \
+        && \
+    make -j8 && \
+    make install
+
+FROM ompi as nccl
+COPY --from=nvcr.io/nvidia/cuda:12.5.0-devel-rockylinux8@sha256:a9ba6587834046132d4ab05a1ce7a01a78fba885bc9eb9f549565b38976983fc "/usr/lib64/libnccl.so.2.21.5" "/usr/lib64/libnccl.so.2.21.5"
+RUN ln -s "/usr/lib64/libnccl.so.2.21.5" "/usr/lib64/libnccl.so.2" && \
+    ln -s "/usr/lib64/libnccl.so.2.21.5" "/usr/lib64/libnccl.so"
+COPY --from=nvcr.io/nvidia/cuda:12.5.0-devel-rockylinux8@sha256:a9ba6587834046132d4ab05a1ce7a01a78fba885bc9eb9f549565b38976983fc "/usr/include/nccl.h" "/usr/include/nccl.h"
+COPY --from=nvcr.io/nvidia/cuda:12.5.0-devel-rockylinux8@sha256:a9ba6587834046132d4ab05a1ce7a01a78fba885bc9eb9f549565b38976983fc "/usr/include/nccl_net.h" "/usr/include/nccl_net.h"
+
+FROM nccl as nvidia-hpcg
+WORKDIR /workdir
+ARG NVIDIA_HPCG_COMMIT_HASH="8d7f630195fafb10a23f525251c116ed602d0865"
+RUN git clone https://github.com/NVIDIA/nvidia-hpcg.git && \
+    cd nvidia-hpcg && \
+    git reset --hard "$NVIDIA_HPCG_COMMIT_HASH"
+WORKDIR /workdir/nvidia-hpcg
+ENV MPI_PATH="$OMPI_DIR" \
+    CUDA_PATH="$CUDA_DIR"
+RUN ./build_sample.sh "" "" "" "" 1 0 1
+
+FROM base as final
+RUN dnf install -y openssh-clients-8.0p1-24.el8 && \
+    dnf clean -y all
+ENV UCX_DIR="/opt/ucx" \
+    OMPI_DIR="/opt/ompi"
+COPY --from=ucx "$UCX_DIR" "$UCX_DIR"
+COPY --from=ompi "$OMPI_DIR" "$OMPI_DIR"
+COPY --from=prerequisites "/usr/lib64/libgomp.so.1" "/usr/lib64/libgomp.so.1"
+COPY --from=cuda "/usr/local/cuda-12.5/lib64/libcusparse.so.12" "/usr/lib64/libcusparse.so.12"
+COPY --from=cuda "/usr/local/cuda-12.5/lib64/libcublas.so.12" "/usr/lib64/libcublas.so.12"
+COPY --from=cuda "/usr/local/cuda-12.5/lib64/libcublasLt.so.12" "/usr/lib64/libcublasLt.so.12"
+COPY --from=cuda "/usr/local/cuda-12.5/lib64/libnvJitLink.so.12" "/usr/lib64/libnvJitLink.so.12"
+COPY --from=nccl "/usr/lib64/libnccl.so.2" "/usr/lib64/libnccl.so.2"
+COPY --from=nvidia-hpcg "/workdir/nvidia-hpcg/bin" "/workspace/hpcg"
+ENV PATH="/usr/bin:/bin:/sbin:/usr/sbin" \
+    LD_LIBRARY_PATH="/usr/lib64:/lib64:/usr/lib:/lib"
+ENV PATH="${UCX_DIR}/bin:${PATH}" \
+    LD_LIBRARY_PATH="${UCX_DIR}/lib:${LD_LIBRARY_PATH}" \
+    OMPI_MCA_pml="ucx"
+ENV PATH="${OMPI_DIR}/bin:${PATH}" \
+    LD_LIBRARY_PATH="${OMPI_DIR}/lib:${LD_LIBRARY_PATH}" \
+    OPAL_PREFIX="$OMPI_DIR" \
+    OMPI_MCA_coll_hcoll_enable="0"
+RUN chmod u+w /usr/*

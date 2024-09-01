@@ -1,0 +1,28 @@
+# Satisfy prerequisites
+# Base image (https://wiki.almalinux.org/containers/docker-images.html#about-almalinux-docker-images)
+FROM almalinux:8.9@sha256:da502e3b8e6d08ee7aa2c384acda0a4afbf31ddae28b6a02e2a5e3003fe86dd9 as prerequisites
+# Install prerequisites
+RUN dnf install -y git gcc && \
+    dnf clean -y all
+
+# Build STREAM
+FROM prerequisites as stream
+# ARG STREAM_ARRAY_SIZE="10000000"
+ARG STREAM_COMMIT_HASH="4dbce1d0fdb7410e8f21b48f3381bc0a1341967f"
+# Pull STREAM source 
+WORKDIR "/workdir"
+RUN git clone "https://github.com/jeffhammond/STREAM" && \
+    cd STREAM && \
+    git checkout "$STREAM_COMMIT_HASH"
+# Compile STREAM source
+WORKDIR "/workdir/STREAM"
+RUN gcc -O2 -fopenmp -DSTREAM_ARRAY_SIZE="10000000" stream.c -o stream.10M && \
+    gcc -O2 -fopenmp -DSTREAM_ARRAY_SIZE="20000000" stream.c -o stream.20M && \
+    gcc -O2 -fopenmp -DSTREAM_ARRAY_SIZE="50000000" stream.c -o stream.50M && \
+    gcc -O2 -fopenmp -DSTREAM_ARRAY_SIZE="100000000" stream.c -o stream.100M && \
+    gcc -O2 -fopenmp -DSTREAM_ARRAY_SIZE="200000000" -mcmodel=medium stream.c -o stream.200M && \
+    gcc -O2 -fopenmp -DSTREAM_ARRAY_SIZE="500000000" -mcmodel=medium stream.c -o stream.500M
+
+# Resume prerequisites stage and run binary from stream stage
+FROM prerequisites as final
+COPY --from=stream "/workdir/STREAM/stream.*" "/bin"

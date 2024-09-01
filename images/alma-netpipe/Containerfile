@@ -1,0 +1,40 @@
+# Satisfy prerequisites
+# Base image (https://wiki.almalinux.org/containers/docker-images.html#about-almalinux-docker-images)
+FROM almalinux:8.9@sha256:da502e3b8e6d08ee7aa2c384acda0a4afbf31ddae28b6a02e2a5e3003fe86dd9 as prerequisites
+# Install prerequisites
+RUN dnf install -y curl-7.61.1-33.el8 tar-1.30-9.el8 make-4.2.1-11.el8 perl-5.26.3-422.el8.0.1 gcc-8.5.0-20.el8.alma gcc-c++-8.5.0-20.el8.alma openssh-clients-8.0p1-19.el8_9.2 && \
+    dnf clean -y all
+
+# Build OpenMPI
+FROM prerequisites as openmpi
+# OMPI_VERSION must be in format "[major].[minor].[patch]" (semantic versioning)
+ARG OMPI_VERSION="4.1.2"
+ENV OMPI_DIR="/opt/openmpi"
+WORKDIR "/workdir"
+# Pull OpenMPI source tarball & extract it
+RUN curl -fSsL -o "/workdir/openmpi-${OMPI_VERSION}.tar.gz" "https://download.open-mpi.org/release/open-mpi/v${OMPI_VERSION%%"."?}/openmpi-${OMPI_VERSION}.tar.gz" && \
+    tar -xzf "openmpi-${OMPI_VERSION}.tar.gz"
+# Compile OpenMPI source
+WORKDIR "/workdir/openmpi-${OMPI_VERSION}/build"
+RUN ../configure --prefix="$OMPI_DIR" --with-slurm --with-pmix=internal && \
+    make -j$(nproc) install
+ENV PATH="$PATH:${OMPI_DIR}/bin" \
+    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${OMPI_DIR}/lib"
+
+FROM openmpi as netpipe
+ARG NETPIPE_VERSION="5.1.4"
+WORKDIR "/workdir"
+# Pull NetPIPE source tarball & extract it
+RUN curl -fSsL -o "NetPIPE-${NETPIPE_VERSION}.tar.gz" "https://netpipe.cs.ksu.edu/download/NetPIPE-${NETPIPE_VERSION}.tar.gz" && \
+    tar -xzf "NetPIPE-${NETPIPE_VERSION}.tar.gz"
+# Compile NetPIPE source
+WORKDIR "/workdir/NetPIPE-${NETPIPE_VERSION}"
+RUN make mpi
+
+# Get compiled OpenMPI library and HPCG binary from previous stages
+FROM prerequisites as final
+ENV OMPI_DIR="/opt/openmpi"
+ENV PATH="$PATH:${OMPI_DIR}/bin" \
+    LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:${OMPI_DIR}/lib"
+COPY --from=openmpi "$OMPI_DIR" "$OMPI_DIR"
+COPY --from=netpipe "/workdir/NetPIPE-*/NPmpi" "/bin/NPmpi"
